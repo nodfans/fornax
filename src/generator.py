@@ -41,16 +41,26 @@ class VerilogGenerator:
 
     def generate(self):
         """Generate Verilog modules and weight hex files."""
-        print("[Generator] Generating Verilog for M1...")
+        print("[Generator] Generating Verilog for M2 Full Block...")
         
-        # 1. Generate weight HEX files (for $readmemh)
+        # 1. Generate weight HEX files
         self._generate_weight_hex()
 
-        # 2. Render MatMul template
-        self._render_matmul()
+        # 2. Render each operation module
+        rendered_modules = set()
+        for op in self.model_ir["ops"]:
+            # We render unique templates once, but they can be instanced multiple times
+            if op["type"] == "linear" and "linear" not in rendered_modules:
+                self._render_linear_template()
+                rendered_modules.add("linear")
+            elif op["type"] == "layernorm" and "layernorm" not in rendered_modules:
+                self._render_layernorm_template()
+                rendered_modules.add("layernorm")
 
-        print(f"[Generator] Verilog emitted to {self.output_dir}/")
-        print(f"[Generator] Hex weights emitted to {self.weights_out_dir}/")
+        # 3. Render the Top module that connects everything
+        self._render_top()
+
+        print(f"[Generator] RTL and top.v emitted to {self.output_dir}/")
 
     def _generate_weight_hex(self):
         """Convert binary quantized weights to HEX string format for Verilog."""
@@ -58,30 +68,45 @@ class VerilogGenerator:
         
         for name, meta in weight_metadata.items():
             bin_path = os.path.join(self.data_dir, meta["path"])
+            if not os.path.exists(bin_path):
+                print(f"[Generator] Warning: Binary weight {bin_path} not found.")
+                continue
+            
             # Load as int8, view as uint8 for easy hex conversion
             weights = np.fromfile(bin_path, dtype=np.int8).view(np.uint8)
             
-            # Convert to HEX (2 chars per byte)
             hex_path = os.path.join(self.weights_out_dir, f"{name}.hex")
             with open(hex_path, "w") as f:
                 for w in weights:
                     f.write(f"{w:02x}\n")
             
-            # Update meta with hex relative path for template
             meta["hex_path"] = f"../weights_hex/{name}.hex"
 
-    def _render_matmul(self):
-        """Render the matmul.v template using IR parameters."""
-        target_op = self.model_ir["target_op"]
-        weight_key = target_op["weight_key"]
-        weight_meta = self.model_ir["weight_metadata"][weight_key]
-
+    def _render_linear_template(self):
+        """Render the generic matmul.v template."""
+        # Note: M2 uses a generic template that is parameterized by instantiations in top.v
         template = self.jinja_env.get_template("matmul.v.j2")
+        # We render it with default parameters or just the logic
+        # For M2, we'll keep the template generic and pass params in top.v
+        # But we need to make sure the template doesn't have hardcoded values
         rendered = template.render(
-            in_features=target_op["in_features"],
-            out_features=target_op["out_features"],
-            weight_file=weight_meta["hex_path"]
+            in_features="IN_FEATURES",
+            out_features="OUT_FEATURES",
+            weight_file="WEIGHT_FILE"
         )
-
         with open(os.path.join(self.output_dir, "matmul.v"), "w") as f:
+            f.write(rendered)
+
+    def _render_layernorm_template(self):
+        """Render the layernorm.v template."""
+        template = self.jinja_env.get_template("layernorm.v.j2")
+        rendered = template.render()
+        with open(os.path.join(self.output_dir, "layernorm.v"), "w") as f:
+            f.write(rendered)
+
+    def _render_top(self):
+        """Render the top.v that connects all ops."""
+        template = self.jinja_env.get_template("top.v.j2")
+        rendered = template.render(ops=self.model_ir["ops"], weight_metadata=self.model_ir["weight_metadata"])
+        with open(os.path.join(self.output_dir, "top.v"), "w") as f:
             f.write(rendered)

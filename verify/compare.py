@@ -3,42 +3,53 @@ import os
 import json
 
 def generate_test_vectors(output_dir="./output"):
-    print("[Verify] Generating test vectors...")
+    print("[Verify] Generating test vectors for M2 Block...")
     ir_path = os.path.join(output_dir, "model_ir.json")
     with open(ir_path, "r") as f:
         ir = json.load(f)
     
-    target_op = ir["target_op"]
-    weight_key = target_op["weight_key"]
-    weight_meta = ir["weight_metadata"][weight_key]
+    # Generate random input (1 x DIM)
+    # Typically LLM hidden size is ir['ops'][0]['dim']
+    dim = ir["ops"][0].get("dim") or ir["ops"][0].get("in_features")
+    input_vec = np.random.randint(-10, 10, size=(dim,), dtype=np.int8)
     
-    # Load quantized weights
-    bin_path = os.path.join(output_dir, weight_meta["path"])
-    weights = np.fromfile(bin_path, dtype=np.int8).reshape(target_op["out_features"], target_op["in_features"])
+    current_val = input_vec.astype(np.float32)
     
-    # 1. Generate random input vector (1 x InFeatures)
-    # We use small values to avoid immediate overflow in M1 simple tests
-    input_vec = np.random.randint(-15, 15, size=(target_op["in_features"],), dtype=np.int8)
+    # Run through the IR chain in Python
+    for op in ir["ops"]:
+        weight_meta = ir["weight_metadata"][op["weight_key"]]
+        bin_path = os.path.join(output_dir, weight_meta["path"])
+        weights = np.fromfile(bin_path, dtype=np.int8)
+        
+        if op["type"] == "layernorm":
+            # Simplified M2 LN: just multiply by weight (scale)
+            # weights is (DIM,)
+            current_val = current_val * weights.astype(np.float32)
+            # Re-quantize to INT8 for next stage
+            current_val = np.clip(current_val, -128, 127).astype(np.int8).astype(np.float32)
+        elif op["type"] == "linear":
+            weights = weights.reshape(op["out_features"], op["in_features"])
+            # Linear: x * W^T
+            current_val = np.matmul(current_val, weights.T.astype(np.float32))
+            # In RTL we take bits [15:8], which is a division by 256
+            current_val = (current_val / 256.0).astype(np.float32)
+            current_val = np.clip(current_val, -128, 127).astype(np.int8).astype(np.float32)
+
+    expected_out = current_val # Final output features
     
-    # 2. Calculate expected output (INT32 accumulation)
-    # y = x * W^T
-    expected_out = np.matmul(input_vec.astype(np.int32), weights.T.astype(np.int32))
-    
-    # 3. Save to HEX files for Verilog
+    # Save files
     testvec_dir = os.path.join(output_dir, "testvectors")
     os.makedirs(testvec_dir, exist_ok=True)
-    
     with open(os.path.join(testvec_dir, "input.hex"), "w") as f:
         for v in input_vec.view(np.uint8):
             f.write(f"{v:02x}\n")
-            
     with open(os.path.join(testvec_dir, "expected.hex"), "w") as f:
-        for v in expected_out.view(np.uint32):
-            # Write 8-byte hex for 32-bit int
-            f.write(f"{v:08x}\n")
-            
-    print(f"[Verify] Test vectors saved to {testvec_dir}/")
-    return input_vec, expected_out
+        # Match the width of the last op in top.v (typically 32-bit linear if last is linear)
+        # For simplify M2, let's assume we output the 32-bit value 
+        for v in expected_out.astype(np.int32).view(np.uint32):
+            f.write(f"{v:08X}\n")
+
+    print(f"[Verify] Test vectors saved.")
 
 def check_results(output_dir="./output"):
     print("\n[Verify] Comparing Simulation Results...")

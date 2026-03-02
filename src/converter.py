@@ -94,21 +94,81 @@ class ModelConverter:
         return q_weight, scale
 
     def _build_ir(self):
-        """Construct the IR representing the hardware flow."""
-        # For M1, we focus on the first linear layer found in the graph
-        first_layer = self.graph["layers"][0]
-        q_proj = next(op for op in first_layer["ops"] if op["name"] == "q_proj")
+        """Construct the IR representing the full Transformer Block (M2)."""
+        layer0 = self.graph["layers"][0]
+        
+        ops = []
+        
+        # 1. input_layernorm (Reads from block input)
+        ln1 = next((op for op in layer0["ops"] if "input_layernorm" in op["name"]), None)
+        if ln1:
+            ops.append({
+                "type": "layernorm",
+                "name": "input_layernorm",
+                "input": "block_input",
+                "dim": ln1["dim"],
+                "weight_key": ln1["weight"]
+            })
+
+        # 2. Attention Projections (Q, K, V all read from ln1)
+        # Note: In M2 we treat them as independent modules to prove multi-instance works
+        prev_output = "input_layernorm" if ln1 else "block_input"
+        
+        for proj in ["q_proj", "k_proj", "v_proj"]:
+            op_data = next((op for op in layer0["ops"] if proj in op["name"]), None)
+            if op_data:
+                ops.append({
+                    "type": "linear",
+                    "name": proj,
+                    "input": prev_output,
+                    "in_features": op_data["in_dim"],
+                    "out_features": op_data["out_dim"],
+                    "weight_key": op_data["weight"]
+                })
+
+        # o_proj (Simplified: in M2 we just chain it after q_proj for PoC)
+        op_data = next((op for op in layer0["ops"] if "o_proj" in op["name"]), None)
+        if op_data:
+            ops.append({
+                "type": "linear",
+                "name": "o_proj",
+                "input": "q_proj", 
+                "in_features": op_data["in_dim"],
+                "out_features": op_data["out_dim"],
+                "weight_key": op_data["weight"]
+            })
+
+        # 3. post_attention_layernorm (Reads from o_proj)
+        ln2 = next((op for op in layer0["ops"] if "post_attention_layernorm" in op["name"]), None)
+        if ln2:
+            ops.append({
+                "type": "layernorm",
+                "name": "post_attention_layernorm",
+                "input": "o_proj",
+                "dim": ln2["dim"],
+                "weight_key": ln2["weight"]
+            })
+
+        # 4. MLP (gate_proj, then down_proj)
+        # We simplify the MLP path for M2 to a serial chain: gate -> down
+        mlp_prev = "post_attention_layernorm" if ln2 else "o_proj"
+        for proj in ["gate_proj", "down_proj"]:
+            op_data = next((op for op in layer0["ops"] if proj in op["name"]), None)
+            if op_data:
+                ops.append({
+                    "type": "linear",
+                    "name": proj,
+                    "input": mlp_prev,
+                    "in_features": op_data["in_dim"],
+                    "out_features": op_data["out_dim"],
+                    "weight_key": op_data["weight"]
+                })
+                mlp_prev = proj
 
         self.model_ir = {
-            "version": "M1",
+            "version": "M2",
             "model_id": self.graph["model_id"],
-            "target_op": {
-                "type": "linear",
-                "name": q_proj["name"],
-                "in_features": q_proj["in_dim"],
-                "out_features": q_proj["out_dim"],
-                "weight_key": q_proj["weight"]
-            },
+            "ops": ops,
             "global_config": {
                 "precision": "int8",
                 "quantization": "symmetric"

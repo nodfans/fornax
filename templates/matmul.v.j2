@@ -7,9 +7,9 @@
  */
 
 module matmul #(
-    parameter IN_FEATURES = {{ in_features }},
-    parameter OUT_FEATURES = {{ out_features }},
-    parameter WEIGHT_FILE = "{{ weight_file }}"
+    parameter IN_FEATURES = 896,
+    parameter OUT_FEATURES = 896,
+    parameter WEIGHT_FILE = ""
 )(
     input wire clk,
     input wire rst_n,
