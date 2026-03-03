@@ -66,7 +66,14 @@ class VerilogGenerator:
         """Convert binary quantized weights to HEX string format for Verilog."""
         weight_metadata = self.model_ir.get("weight_metadata", {})
         
-        for name, meta in weight_metadata.items():
+        # OPTIMIZATION: Only generate hex for weights used in this specific IR
+        used_weights = {op["weight_key"] for op in self.model_ir["ops"] if "weight_key" in op}
+        
+        for name in used_weights:
+            if name not in weight_metadata:
+                print(f"[Generator] Warning: Metadata for {name} not found in IR.")
+                continue
+            meta = weight_metadata[name]
             bin_path = os.path.join(self.data_dir, meta["path"])
             if not os.path.exists(bin_path):
                 print(f"[Generator] Warning: Binary weight {bin_path} not found.")
@@ -76,9 +83,12 @@ class VerilogGenerator:
             weights = np.fromfile(bin_path, dtype=np.int8).view(np.uint8)
             
             hex_path = os.path.join(self.weights_out_dir, f"{name}.hex")
+            # OPTIMIZATION: Process in chunks and use join to reduce write calls
+            chunk_size = 65536
             with open(hex_path, "w") as f:
-                for w in weights:
-                    f.write(f"{w:02x}\n")
+                for i in range(0, len(weights), chunk_size):
+                    chunk = weights[i:i+chunk_size]
+                    f.write("\n".join([f"{w:02x}" for w in chunk]) + "\n")
             
             meta["hex_path"] = f"../weights_hex/{name}.hex"
 
