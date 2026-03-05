@@ -1,0 +1,42 @@
+/*
+ * scale.v - Fornax M3
+ * scores_i = (in_i * MULTIPLIER) >>> SHIFT
+ */
+
+module scale #(
+    parameter DIM = 128,
+    parameter MULTIPLIER = 8192,
+    parameter SHIFT = 16
+)(
+    input wire clk,
+    input wire rst_n,
+    input wire signed [7:0] in_data,
+    input wire in_valid,
+    output reg signed [7:0] out_data,
+    output reg out_valid
+);
+    reg [15:0] count;
+    wire signed [31:0] scaled = $signed(in_data) * $signed(MULTIPLIER);
+    wire signed [31:0] shifted = scaled >>> SHIFT;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            count <= 0;
+            out_data <= 0;
+            out_valid <= 0;
+        end else begin
+            out_valid <= 0;
+            if (in_valid) begin
+                out_data <= (shifted > 127) ? 8'sh7f :
+                            (shifted < -128) ? 8'sh80 :
+                            shifted[7:0];
+                out_valid <= 1;
+                if (count == DIM - 1)
+                    count <= 0;
+                else
+                    count <= count + 1;
+            end
+        end
+    end
+endmodule
+

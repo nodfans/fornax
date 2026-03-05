@@ -14,23 +14,72 @@ module fornax_layer0 (
 
     // Intermediate signals
     {% for op in ops %}
-    wire signed [{{ 31 if op.type == "linear" else 7 }}:0] out_{{ op.name }};
+    wire signed [{% if op.type in ["linear", "lm_head", "qk_dot", "scale_scalar", "qk_matmul_strict"] %}31{% elif op.type == "scale_scores" %}15{% else %}7{% endif %}:0] out_{{ op.name }};
     wire valid_{{ op.name }};
     {% endfor %}
 
     // Instantiations
     {% for op in ops %}
+    {% if op.inputs is defined and op.inputs|length >= 2 %}
+    {% set in_a_name = op.inputs[0] %}
+    {% set in_b_name = op.inputs[1] %}
+    {% elif op.input_a is defined and op.input_b is defined %}
+    {% set in_a_name = op.input_a %}
+    {% set in_b_name = op.input_b %}
+    {% endif %}
+
+    {% if in_a_name is defined and in_b_name is defined %}
+    {% set input_a_sig = "in_data" if in_a_name == "block_input" else "out_" + in_a_name %}
+    {% set input_b_sig = "in_data" if in_b_name == "block_input" else "out_" + in_b_name %}
+    {% set input_a_valid = "in_valid" if in_a_name == "block_input" else "valid_" + in_a_name %}
+    {% set input_b_valid = "in_valid" if in_b_name == "block_input" else "valid_" + in_b_name %}
+    {% set prev_a = ops_dict.get(in_a_name) %}
+    {% set prev_b = ops_dict.get(in_b_name) %}
+
+    {% if in_a_name == "block_input" or (prev_a and prev_a.type != "linear") %}
+    wire signed [7:0] {{ op.name }}_in_a_vec_8 = {{ input_a_sig }}[7:0];
+    {% else %}
+    wire signed [47:0] {{ op.name }}_a_scaled = $signed({{ input_a_sig }}) * $signed({{ prev_a.ms_multiplier }});
+    wire signed [47:0] {{ op.name }}_a_shifted = {{ op.name }}_a_scaled >>> {{ prev_a.ms_shift }};
+    wire signed [7:0] {{ op.name }}_in_a_vec_8 = ({{ op.name }}_a_shifted > 127) ? 8'sh7f :
+                                                 ({{ op.name }}_a_shifted < -128) ? 8'sh80 :
+                                                 {{ op.name }}_a_shifted[7:0];
+    {% endif %}
+
+    {% if in_b_name == "block_input" or (prev_b and prev_b.type != "linear") %}
+    wire signed [7:0] {{ op.name }}_in_b_vec_8 = {{ input_b_sig }}[7:0];
+    {% else %}
+    wire signed [47:0] {{ op.name }}_b_scaled = $signed({{ input_b_sig }}) * $signed({{ prev_b.ms_multiplier }});
+    wire signed [47:0] {{ op.name }}_b_shifted = {{ op.name }}_b_scaled >>> {{ prev_b.ms_shift }};
+    wire signed [7:0] {{ op.name }}_in_b_vec_8 = ({{ op.name }}_b_shifted > 127) ? 8'sh7f :
+                                                 ({{ op.name }}_b_shifted < -128) ? 8'sh80 :
+                                                 {{ op.name }}_b_shifted[7:0];
+    {% endif %}
+    {% else %}
     {% set input_sig = "in_data" if op.input == "block_input" else "out_" + op.input %}
     {% set input_valid = "in_valid" if op.input == "block_input" else "valid_" + op.input %}
-    
-    // Width adaptation: Linear output is 32-bit, but next stages (LN/Linear) expect 8-bit.
-    // In M2, we take bits [15:8] as a simple quantization/scaling 
-    {% set is_initial = 1 if (op.input == "block_input" or "layernorm" in op.input) else 0 %}
-    wire signed [7:0] {{ op.name }}_in_vec_8 = ({{ is_initial }}) ? {{ input_sig }}[7:0] : {{ input_sig }}[15:8];
+    {% set prev_op = ops_dict.get(op.input) %}
 
-    {% if op.type == "layernorm" %}
-    layernorm #(
+    {% if op.type in ["scale_scalar", "softmax_scalar", "scale_scores"] %}
+    wire signed [31:0] {{ op.name }}_in_scalar_32 = {{ input_sig }};
+    {% elif op.type == "softmax_rows" and prev_op and prev_op.type == "scale_scores" %}
+    wire signed [15:0] {{ op.name }}_in_scores_16 = {{ input_sig }}[15:0];
+    {% elif op.input == "block_input" or (prev_op and prev_op.type != "linear") %}
+    wire signed [7:0] {{ op.name }}_in_vec_8 = {{ input_sig }}[7:0];
+    {% else %}
+    wire signed [47:0] {{ op.name }}_scaled = $signed({{ input_sig }}) * $signed({{ prev_op.ms_multiplier }});
+    wire signed [47:0] {{ op.name }}_shifted = {{ op.name }}_scaled >>> {{ prev_op.ms_shift }};
+    wire signed [7:0] {{ op.name }}_in_vec_8 = ({{ op.name }}_shifted > 127) ? 8'sh7f :
+                                              ({{ op.name }}_shifted < -128) ? 8'sh80 :
+                                              {{ op.name }}_shifted[7:0];
+    {% endif %}
+    {% endif %}
+
+    {% if op.type == "embedding_lookup" %}
+    embedding_lookup #(
+        .VOCAB_SIZE({{ op.vocab_size }}),
         .DIM({{ op.dim }}),
+        .TOKEN_ID({{ op.token_id }}),
         .WEIGHT_FILE("{{ weight_metadata[op.weight_key].hex_path }}")
     ) inst_{{ op.name }} (
         .clk(clk),
@@ -40,7 +89,21 @@ module fornax_layer0 (
         .out_data(out_{{ op.name }}),
         .out_valid(valid_{{ op.name }})
     );
-    {% elif op.type == "linear" %}
+    {% elif op.type == "layernorm" or op.type == "final_rmsnorm" %}
+    layernorm #(
+        .DIM({{ op.dim }}),
+        .WEIGHT_FILE("{{ weight_metadata[op.weight_key].hex_path }}"),
+        .MS_MULTIPLIER({{ op.ms_multiplier }}),
+        .MS_SHIFT({{ op.ms_shift }})
+    ) inst_{{ op.name }} (
+        .clk(clk),
+        .rst_n(rst_n),
+        .in_data({{ op.name }}_in_vec_8),
+        .in_valid({{ input_valid }}),
+        .out_data(out_{{ op.name }}),
+        .out_valid(valid_{{ op.name }})
+    );
+    {% elif op.type == "linear" or op.type == "lm_head" %}
     matmul #(
         .IN_FEATURES({{ op.in_features }}),
         .OUT_FEATURES({{ op.out_features }}),
@@ -53,10 +116,175 @@ module fornax_layer0 (
         .out_data(out_{{ op.name }}),
         .out_valid(valid_{{ op.name }})
     );
+    {% elif op.type == "softmax" %}
+    softmax #(
+        .DIM({{ op.dim }})
+    ) inst_{{ op.name }} (
+        .clk(clk),
+        .rst_n(rst_n),
+        .in_data({{ op.name }}_in_vec_8),
+        .in_valid({{ input_valid }}),
+        .out_data(out_{{ op.name }}),
+        .out_valid(valid_{{ op.name }})
+    );
+    {% elif op.type == "matmul_qk" %}
+    matmul_qk #(
+        .DIM({{ op.dim }})
+    ) inst_{{ op.name }} (
+        .clk(clk),
+        .rst_n(rst_n),
+        .in_a_data({{ op.name }}_in_a_vec_8),
+        .in_b_data({{ op.name }}_in_b_vec_8),
+        .in_a_valid({{ input_a_valid }}),
+        .in_b_valid({{ input_b_valid }}),
+        .out_data(out_{{ op.name }}),
+        .out_valid(valid_{{ op.name }})
+    );
+    {% elif op.type == "scale" %}
+    scale #(
+        .DIM({{ op.dim }}),
+        .MULTIPLIER({{ op.multiplier }}),
+        .SHIFT({{ op.shift }})
+    ) inst_{{ op.name }} (
+        .clk(clk),
+        .rst_n(rst_n),
+        .in_data({{ op.name }}_in_vec_8),
+        .in_valid({{ input_valid }}),
+        .out_data(out_{{ op.name }}),
+        .out_valid(valid_{{ op.name }})
+    );
+    {% elif op.type == "matmul_sv" %}
+    matmul_sv #(
+        .DIM({{ op.dim }})
+    ) inst_{{ op.name }} (
+        .clk(clk),
+        .rst_n(rst_n),
+        .in_a_data({{ op.name }}_in_a_vec_8),
+        .in_b_data({{ op.name }}_in_b_vec_8),
+        .in_a_valid({{ input_a_valid }}),
+        .in_b_valid({{ input_b_valid }}),
+        .out_data(out_{{ op.name }}),
+        .out_valid(valid_{{ op.name }})
+    );
+    {% elif op.type == "qk_dot" %}
+    qk_dot #(
+        .DIM({{ op.dim }})
+    ) inst_{{ op.name }} (
+        .clk(clk),
+        .rst_n(rst_n),
+        .in_a_data({{ op.name }}_in_a_vec_8),
+        .in_b_data({{ op.name }}_in_b_vec_8),
+        .in_a_valid({{ input_a_valid }}),
+        .in_b_valid({{ input_b_valid }}),
+        .out_data(out_{{ op.name }}),
+        .out_valid(valid_{{ op.name }})
+    );
+    {% elif op.type == "scale_scalar" %}
+    scale_scalar #(
+        .MULTIPLIER({{ op.multiplier }}),
+        .SHIFT({{ op.shift }})
+    ) inst_{{ op.name }} (
+        .clk(clk),
+        .rst_n(rst_n),
+        .in_data({{ op.name }}_in_scalar_32),
+        .in_valid({{ input_valid }}),
+        .out_data(out_{{ op.name }}),
+        .out_valid(valid_{{ op.name }})
+    );
+    {% elif op.type == "softmax_scalar" %}
+    softmax_scalar inst_{{ op.name }} (
+        .clk(clk),
+        .rst_n(rst_n),
+        .in_data({{ op.name }}_in_scalar_32),
+        .in_valid({{ input_valid }}),
+        .out_data(out_{{ op.name }}),
+        .out_valid(valid_{{ op.name }})
+    );
+    {% elif op.type == "sv_matmul" %}
+    sv_matmul #(
+        .DIM({{ op.dim }})
+    ) inst_{{ op.name }} (
+        .clk(clk),
+        .rst_n(rst_n),
+        .in_a_data({{ op.name }}_in_a_vec_8),
+        .in_b_data({{ op.name }}_in_b_vec_8),
+        .in_a_valid({{ input_a_valid }}),
+        .in_b_valid({{ input_b_valid }}),
+        .out_data(out_{{ op.name }}),
+        .out_valid(valid_{{ op.name }})
+    );
+    {% elif op.type == "qk_matmul_strict" %}
+    qk_matmul_strict #(
+        .DIM({{ op.dim }}),
+        .SEQ_LEN({{ op.seq_len }}),
+        .NUM_HEADS({{ op.num_heads }}),
+        .HEAD_DIM({{ op.head_dim }})
+    ) inst_{{ op.name }} (
+        .clk(clk),
+        .rst_n(rst_n),
+        .in_a_data({{ op.name }}_in_a_vec_8),
+        .in_b_data({{ op.name }}_in_b_vec_8),
+        .in_a_valid({{ input_a_valid }}),
+        .in_b_valid({{ input_b_valid }}),
+        .out_data(out_{{ op.name }}),
+        .out_valid(valid_{{ op.name }})
+    );
+    {% elif op.type == "scale_scores" %}
+    scale_scores #(
+        .SEQ_LEN({{ op.seq_len }}),
+        .NUM_HEADS({{ op.num_heads }}),
+        .MULTIPLIER({{ op.multiplier }}),
+        .SHIFT({{ op.shift }})
+    ) inst_{{ op.name }} (
+        .clk(clk),
+        .rst_n(rst_n),
+        .in_data({{ op.name }}_in_scalar_32),
+        .in_valid({{ input_valid }}),
+        .out_data(out_{{ op.name }}),
+        .out_valid(valid_{{ op.name }})
+    );
+    {% elif op.type == "softmax_rows" %}
+    softmax_rows #(
+        .SEQ_LEN({{ op.seq_len }}),
+        .NUM_HEADS({{ op.num_heads }})
+    ) inst_{{ op.name }} (
+        .clk(clk),
+        .rst_n(rst_n),
+        .in_data({{ op.name }}_in_scores_16),
+        .in_valid({{ input_valid }}),
+        .out_data(out_{{ op.name }}),
+        .out_valid(valid_{{ op.name }})
+    );
+    {% elif op.type == "sv_matmul_strict" %}
+    sv_matmul_strict #(
+        .DIM({{ op.dim }}),
+        .SEQ_LEN({{ op.seq_len }}),
+        .NUM_HEADS({{ op.num_heads }}),
+        .HEAD_DIM({{ op.head_dim }})
+    ) inst_{{ op.name }} (
+        .clk(clk),
+        .rst_n(rst_n),
+        .in_a_data({{ op.name }}_in_a_vec_8),
+        .in_b_data({{ op.name }}_in_b_vec_8),
+        .in_a_valid({{ input_a_valid }}),
+        .in_b_valid({{ input_b_valid }}),
+        .out_data(out_{{ op.name }}),
+        .out_valid(valid_{{ op.name }})
+    );
     {% endif %}
     {% endfor %}
 
     assign out_data = out_{{ ops[-1].name }};
     assign out_valid = valid_{{ ops[-1].name }};
+
+`ifdef FORNAX_DEBUG
+    always @(posedge clk) begin
+        {% for op in ops %}
+        if (valid_{{ op.name }} && $time < 100000000) begin
+            $display("[TRACE] t:%t | Op:{{ op.name }} | Out:%h", $time, out_{{ op.name }});
+        end
+        {% endfor %}
+    end
+`endif
 
 endmodule

@@ -1,0 +1,219 @@
+name: M3 Validation Regression
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - "codex/**"
+  pull_request:
+
+jobs:
+  regression-legacy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy jinja2
+          sudo apt-get update
+          sudo apt-get install -y iverilog
+
+      - name: Run Regression
+        run: |
+          python verify/run_regression.py --artifact-dir artifacts/regression/${{ github.job }}
+
+      - name: Build Compact Summary (Always)
+        if: always()
+        run: |
+          mkdir -p artifacts/compact
+          {
+            echo "M3 Regression Summary"
+            echo "====================="
+            echo "job_status=${{ job.status }}"
+            echo "run_id=${{ github.run_id }}"
+            echo "sha=${{ github.sha }}"
+            echo
+            echo "Files present:"
+            ls -la artifacts/regression/${{ github.job }}/output 2>/dev/null || true
+            echo
+            echo "Testvectors:"
+            wc -l artifacts/regression/${{ github.job }}/output/testvectors/expected.hex 2>/dev/null || true
+            wc -l artifacts/regression/${{ github.job }}/output/testvectors/actual.hex 2>/dev/null || true
+          } > artifacts/compact/summary.txt
+
+          if [ -f artifacts/regression/${{ github.job }}/output/testbench/sim_check.log ]; then
+            cp artifacts/regression/${{ github.job }}/output/testbench/sim_check.log artifacts/compact/sim_check.log
+          fi
+          if [ -f artifacts/regression/${{ github.job }}/output/testvectors/expected.hex ]; then
+            cp artifacts/regression/${{ github.job }}/output/testvectors/expected.hex artifacts/compact/expected.hex
+          fi
+          if [ -f artifacts/regression/${{ github.job }}/output/testvectors/actual.hex ]; then
+            cp artifacts/regression/${{ github.job }}/output/testvectors/actual.hex artifacts/compact/actual.hex
+          fi
+
+      - name: Upload Compact Summary (Always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m3-regression-compact-legacy
+          path: artifacts/compact
+          if-no-files-found: ignore
+
+      - name: Upload Regression Artifacts (Failure Only)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m3-regression-artifacts-legacy
+          path: artifacts/regression/${{ github.job }}
+          if-no-files-found: ignore
+
+  regression-strict:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy jinja2
+          sudo apt-get update
+          sudo apt-get install -y iverilog
+
+      - name: Run Strict Regression
+        run: |
+          python verify/run_regression.py --artifact-dir artifacts/regression/${{ github.job }} --strict-attn
+
+      - name: Build Compact Summary (Always)
+        if: always()
+        run: |
+          mkdir -p artifacts/compact
+          {
+            echo "M3 Strict Regression Summary"
+            echo "============================"
+            echo "job_status=${{ job.status }}"
+            echo "run_id=${{ github.run_id }}"
+            echo "sha=${{ github.sha }}"
+            echo
+            echo "Files present:"
+            ls -la artifacts/regression/${{ github.job }}/output 2>/dev/null || true
+            echo
+            echo "Testvectors:"
+            wc -l artifacts/regression/${{ github.job }}/output/testvectors/expected.hex 2>/dev/null || true
+            wc -l artifacts/regression/${{ github.job }}/output/testvectors/actual.hex 2>/dev/null || true
+          } > artifacts/compact/summary.txt
+
+          if [ -f artifacts/regression/${{ github.job }}/output/testbench/sim_check.log ]; then
+            cp artifacts/regression/${{ github.job }}/output/testbench/sim_check.log artifacts/compact/sim_check.log
+          fi
+          if [ -f artifacts/regression/${{ github.job }}/output/testvectors/expected.hex ]; then
+            cp artifacts/regression/${{ github.job }}/output/testvectors/expected.hex artifacts/compact/expected.hex
+          fi
+          if [ -f artifacts/regression/${{ github.job }}/output/testvectors/actual.hex ]; then
+            cp artifacts/regression/${{ github.job }}/output/testvectors/actual.hex artifacts/compact/actual.hex
+          fi
+
+      - name: Upload Compact Summary (Always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m3-regression-compact-strict
+          path: artifacts/compact
+          if-no-files-found: ignore
+
+      - name: Upload Regression Artifacts (Failure Only)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m3-regression-artifacts-strict
+          path: artifacts/regression/${{ github.job }}
+          if-no-files-found: ignore
+
+  regression-strict-seq4:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy jinja2
+          sudo apt-get update
+          sudo apt-get install -y iverilog
+
+      - name: Run Strict Regression (Seq4)
+        env:
+          FORNAX_STRICT_SEQ_LEN: "4"
+        run: |
+          python verify/run_regression.py --artifact-dir artifacts/regression/${{ github.job }} --strict-attn
+
+      - name: Build Compact Summary (Always)
+        if: always()
+        run: |
+          mkdir -p artifacts/compact
+          {
+            echo "M3 Strict Regression Summary (SEQ_LEN=4)"
+            echo "========================================="
+            echo "job_status=${{ job.status }}"
+            echo "run_id=${{ github.run_id }}"
+            echo "sha=${{ github.sha }}"
+            echo
+            echo "Files present:"
+            ls -la artifacts/regression/${{ github.job }}/output 2>/dev/null || true
+            echo
+            echo "Testvectors:"
+            wc -l artifacts/regression/${{ github.job }}/output/testvectors/expected.hex 2>/dev/null || true
+            wc -l artifacts/regression/${{ github.job }}/output/testvectors/actual.hex 2>/dev/null || true
+          } > artifacts/compact/summary.txt
+
+          if [ -f artifacts/regression/${{ github.job }}/output/testbench/sim_check.log ]; then
+            cp artifacts/regression/${{ github.job }}/output/testbench/sim_check.log artifacts/compact/sim_check.log
+          fi
+          if [ -f artifacts/regression/${{ github.job }}/output/testvectors/expected.hex ]; then
+            cp artifacts/regression/${{ github.job }}/output/testvectors/expected.hex artifacts/compact/expected.hex
+          fi
+          if [ -f artifacts/regression/${{ github.job }}/output/testvectors/actual.hex ]; then
+            cp artifacts/regression/${{ github.job }}/output/testvectors/actual.hex artifacts/compact/actual.hex
+          fi
+
+      - name: Upload Compact Summary (Always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m3-regression-compact-strict-seq4
+          path: artifacts/compact
+          if-no-files-found: ignore
+
+      - name: Upload Regression Artifacts (Failure Only)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m3-regression-artifacts-strict-seq4
+          path: artifacts/regression/${{ github.job }}
+          if-no-files-found: ignore

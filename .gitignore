@@ -33,6 +33,9 @@ wheels/
 *.mcs
 *.prm
 *.sh
+!run_m3_validation.sh
+*.vcd
+sim_*
 .Xil/
 vivado*.backup.jou
 vivado*.backup.log
@@ -51,5 +54,5 @@ xsim.dir/
 *.pth
 *.bin
 /weights/
-Context.md
 .venv/
+/artifacts/

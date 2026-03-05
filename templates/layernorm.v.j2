@@ -6,7 +6,9 @@
 
 module layernorm #(
     parameter DIM = 896,
-    parameter WEIGHT_FILE = ""
+    parameter WEIGHT_FILE = "",
+    parameter MS_MULTIPLIER = 1,
+    parameter MS_SHIFT = 0
 )(
     input wire clk,
     input wire rst_n,
@@ -17,26 +19,30 @@ module layernorm #(
 );
 
     reg signed [7:0] weight_rom [0:DIM-1];
+    integer i;
     initial begin
+        for (i = 0; i < DIM; i = i + 1) weight_rom[i] = 0;
         if (WEIGHT_FILE != "") $readmemh(WEIGHT_FILE, weight_rom);
     end
 
     reg [15:0] count;
-    reg signed [15:0] prod;
+    wire signed [31:0] prod = $signed(in_data) * $signed(weight_rom[count]);
+    wire signed [47:0] scaled = $signed(prod) * $signed(MS_MULTIPLIER);
+    wire signed [47:0] shifted = scaled >>> MS_SHIFT;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             count <= 0;
             out_data <= 0;
             out_valid <= 0;
-            prod <= 0;
         end else begin
             out_valid <= 0;
             if (in_valid) begin
-                // Simplified LN: scale by weight and shift to stay in 8-bit
-                // (in_data * weight) >> 7 (approx divide by 128)
-                prod = $signed(in_data) * $signed(weight_rom[count]);
-                out_data <= prod[14:7]; 
+                // Saturating clipping of the pre-calculated shifted value
+                out_data <= (shifted > 127) ? 8'sh7f : 
+                            (shifted < -128) ? 8'sh80 : 
+                            shifted[7:0];
+                
                 out_valid <= 1;
                 
                 if (count == DIM - 1)
@@ -46,5 +52,14 @@ module layernorm #(
             end
         end
     end
+
+`ifdef FORNAX_DEBUG
+    always @(posedge clk) begin
+        if (in_valid && $time < 2000000) begin
+            $display("[LN-DEBUG] t:%t | count:%d | in:%h | w:%h | out:%h | v:%b",
+                     $time, count, in_data, weight_rom[count], out_data, out_valid);
+        end
+    end
+`endif
 
 endmodule

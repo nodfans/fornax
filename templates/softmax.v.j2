@@ -1,0 +1,164 @@
+/*
+ * softmax.v - Fornax M3
+ * LUT-based Softmax: y_i = exp(x_i - max(x)) / sum(exp(x_j - max(x)))
+ */
+
+module softmax #(
+    parameter DIM = 896
+)(
+    input wire clk,
+    input wire rst_n,
+    input wire signed [7:0] in_data,
+    input wire in_valid,
+    output reg signed [7:0] out_data,
+    output reg out_valid
+);
+
+    // Internal Buffer to store the input vector
+    reg signed [7:0] buffer [0:DIM-1];
+    reg [15:0] count;
+    reg signed [7:0] max_val;
+    reg [23:0] sum_exp; // 24-bit to avoid overflow of sum of 896 exp values
+    
+    // exp(x) LUT for x in [-127, 0]
+    // exp_lut[abs(x)] approx exp(x/16.0) * 255
+    reg [7:0] exp_lut [0:127];
+    reg [15:0] out_count;
+    reg [7:0] diff;
+    reg [15:0] prod;
+    reg [15:0] norm_q;
+    integer i;
+
+    initial begin
+        // Initialize all to 0 to avoid X propagation
+        for (i = 0; i < 128; i = i + 1) begin
+            exp_lut[i] = 0;
+        end
+        for (i = 0; i < DIM; i = i + 1) begin
+            buffer[i] = 0;
+        end
+        // Full exp(-x/16.0) * 255 LUT
+        exp_lut[0] = 8'hff; exp_lut[1] = 8'hef; exp_lut[2] = 8'he1; exp_lut[3] = 8'hd3;
+        exp_lut[4] = 8'hc6; exp_lut[5] = 8'hba; exp_lut[6] = 8'haf; exp_lut[7] = 8'ha4;
+        exp_lut[8] = 8'h9a; exp_lut[9] = 8'h91; exp_lut[10] = 8'h88; exp_lut[11] = 8'h80;
+        exp_lut[12] = 8'h78; exp_lut[13] = 8'h71; exp_lut[14] = 8'h6a; exp_lut[15] = 8'h63;
+        exp_lut[16] = 8'h5d; exp_lut[17] = 8'h58; exp_lut[18] = 8'h52; exp_lut[19] = 8'h4d;
+        exp_lut[20] = 8'h49; exp_lut[21] = 8'h44; exp_lut[22] = 8'h40; exp_lut[23] = 8'h3c;
+        exp_lut[24] = 8'h38; exp_lut[25] = 8'h35; exp_lut[26] = 8'h32; exp_lut[27] = 8'h2f;
+        exp_lut[28] = 8'h2c; exp_lut[29] = 8'h29; exp_lut[30] = 8'h27; exp_lut[31] = 8'h24;
+        exp_lut[32] = 8'h22; exp_lut[33] = 8'h20; exp_lut[34] = 8'h1e; exp_lut[35] = 8'h1c;
+        exp_lut[36] = 8'h1a; exp_lut[37] = 8'h19; exp_lut[38] = 8'h17; exp_lut[39] = 8'h16;
+        exp_lut[40] = 8'h14; exp_lut[41] = 8'h13; exp_lut[42] = 8'h12; exp_lut[43] = 8'h11;
+        exp_lut[44] = 8'h10; exp_lut[45] = 8'h0f; exp_lut[46] = 8'h0e; exp_lut[47] = 8'h0d;
+        exp_lut[48] = 8'h0c; exp_lut[49] = 8'h0b; exp_lut[50] = 8'h0b; exp_lut[51] = 8'h0a;
+        exp_lut[52] = 8'h09; exp_lut[53] = 8'h09; exp_lut[54] = 8'h08; exp_lut[55] = 8'h08;
+        exp_lut[56] = 8'h07; exp_lut[57] = 8'h07; exp_lut[58] = 8'h06; exp_lut[59] = 8'h06;
+        exp_lut[60] = 8'h05; exp_lut[61] = 8'h05; exp_lut[62] = 8'h05; exp_lut[63] = 8'h04;
+        exp_lut[64] = 8'h04; exp_lut[65] = 8'h04; exp_lut[66] = 8'h04; exp_lut[67] = 8'h03;
+        exp_lut[68] = 8'h03; exp_lut[69] = 8'h03; exp_lut[70] = 8'h03; exp_lut[71] = 8'h03;
+        exp_lut[72] = 8'h02; exp_lut[73] = 8'h02; exp_lut[74] = 8'h02; exp_lut[75] = 8'h02;
+        exp_lut[76] = 8'h02; exp_lut[77] = 8'h02; exp_lut[78] = 8'h01; exp_lut[79] = 8'h01;
+        exp_lut[80] = 8'h01; exp_lut[81] = 8'h01; exp_lut[82] = 8'h01; exp_lut[83] = 8'h01;
+        exp_lut[84] = 8'h01; exp_lut[85] = 8'h01; exp_lut[86] = 8'h01; exp_lut[87] = 8'h01;
+        exp_lut[88] = 8'h01; exp_lut[89] = 8'h00; exp_lut[90] = 8'h00; exp_lut[91] = 8'h00;
+        exp_lut[92] = 8'h00; exp_lut[93] = 8'h00; exp_lut[94] = 8'h00; exp_lut[95] = 8'h00;
+        exp_lut[96] = 8'h00; exp_lut[97] = 8'h00; exp_lut[98] = 8'h00; exp_lut[99] = 8'h00;
+        exp_lut[100] = 8'h00; exp_lut[101] = 8'h00; exp_lut[102] = 8'h00; exp_lut[103] = 8'h00;
+        exp_lut[104] = 8'h00; exp_lut[105] = 8'h00; exp_lut[106] = 8'h00; exp_lut[107] = 8'h00;
+        exp_lut[108] = 8'h00; exp_lut[109] = 8'h00; exp_lut[110] = 8'h00; exp_lut[111] = 8'h00;
+        exp_lut[112] = 8'h00; exp_lut[113] = 8'h00; exp_lut[114] = 8'h00; exp_lut[115] = 8'h00;
+        exp_lut[116] = 8'h00; exp_lut[117] = 8'h00; exp_lut[118] = 8'h00; exp_lut[119] = 8'h00;
+        exp_lut[120] = 8'h00; exp_lut[121] = 8'h00; exp_lut[122] = 8'h00; exp_lut[123] = 8'h00;
+        exp_lut[124] = 8'h00; exp_lut[125] = 8'h00; exp_lut[126] = 8'h00; exp_lut[127] = 8'h00;
+    end
+
+    // State Machine
+    localparam IDLE    = 3'd0;
+    localparam PASS1   = 3'd1; // Buffer input and find max
+    localparam PASS2   = 3'd2; // Calculate sum of exp(x - max)
+    localparam PASS3   = 3'd3; // Output exp / sum
+    reg [2:0] state;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            state <= IDLE;
+            count <= 0;
+            max_val <= -128;
+            sum_exp <= 0;
+            out_valid <= 0;
+            out_count <= 0;
+            diff <= 0;
+            prod <= 0;
+            norm_q <= 0;
+            out_data <= 0;
+        end else begin
+            out_valid <= 0; // Default
+            case (state)
+                IDLE: begin
+                    if (in_valid) begin
+                        buffer[0] <= in_data;
+                        max_val <= in_data;
+                        count <= 1;
+                        state <= PASS1;
+                    end
+                end
+
+                PASS1: begin
+                    if (in_valid) begin
+                        buffer[count] <= in_data;
+                        if (in_data > max_val) max_val <= in_data;
+                        if (count == DIM - 1) begin
+                            state <= PASS2;
+                            count <= 0;
+                        end else begin
+                            count <= count + 1;
+                        end
+                    end
+                end
+
+                PASS2: begin
+                    // One exp per cycle
+                    // diff = max_val - buffer[count] (always >= 0)
+                    // If diff > 127, exp is basically 0
+                    diff = max_val - buffer[count];
+                    if (diff < 128)
+                        sum_exp <= sum_exp + exp_lut[diff];
+                    
+                    if (count == DIM - 1) begin
+                        state <= PASS3;
+                        count <= 0;
+                        out_count <= 0;
+                    end else begin
+                        count <= count + 1;
+                    end
+                end
+
+                PASS3: begin
+                    // output = (exp(diff) * 127) / sum_exp
+                    // Saturate to signed int8 range to avoid overflow wrapping.
+                    diff = max_val - buffer[count];
+                    if (diff < 128) begin
+                        prod = exp_lut[diff] * 8'h7f;
+                        norm_q = prod / (sum_exp[23:8] + 1); // Simplified normalization
+                        if (norm_q > 16'd127)
+                            out_data <= 8'sh7f;
+                        else
+                            out_data <= {1'b0, norm_q[6:0]};
+                    end else begin
+                        out_data <= 0;
+                    end
+                    out_valid <= 1;
+
+                    if (count == DIM - 1) begin
+                        state <= IDLE;
+                        count <= 0;
+                        sum_exp <= 0;
+                    end else begin
+                        count <= count + 1;
+                    end
+                end
+            endcase
+        end
+    end
+
+endmodule

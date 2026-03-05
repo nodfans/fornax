@@ -1,0 +1,104 @@
+{
+  "version": "M3_STRICT_ATTN_DRAFT",
+  "model_id": "Qwen/Qwen2-0.5B",
+  "ops": [
+    {
+      "type": "layernorm",
+      "name": "input_layernorm",
+      "input": "block_input",
+      "dim": 896,
+      "weight_key": "model_layers_0_input_layernorm_weight",
+      "ms_multiplier": 496,
+      "ms_shift": 16,
+      "out_dtype": "int8"
+    },
+    {
+      "type": "linear",
+      "name": "q_proj",
+      "input": "input_layernorm",
+      "in_features": 896,
+      "out_features": 896,
+      "weight_key": "model_layers_0_self_attn_q_proj_weight",
+      "ms_multiplier": 496,
+      "ms_shift": 16,
+      "out_dtype": "int8"
+    },
+    {
+      "type": "linear",
+      "name": "k_proj",
+      "input": "input_layernorm",
+      "in_features": 896,
+      "out_features": 128,
+      "weight_key": "model_layers_0_self_attn_k_proj_weight",
+      "ms_multiplier": 399,
+      "ms_shift": 16,
+      "out_dtype": "int8"
+    },
+    {
+      "type": "linear",
+      "name": "v_proj",
+      "input": "input_layernorm",
+      "in_features": 896,
+      "out_features": 128,
+      "weight_key": "model_layers_0_self_attn_v_proj_weight",
+      "ms_multiplier": 36,
+      "ms_shift": 16,
+      "out_dtype": "int8"
+    },
+    {
+      "type": "qk_matmul",
+      "name": "attn_logits",
+      "inputs": ["q_proj", "k_proj"],
+      "seq_len": 1,
+      "num_heads": 14,
+      "head_dim": 64,
+      "tensor_layout": "BHSd",
+      "out_dtype": "int32"
+    },
+    {
+      "type": "scale",
+      "name": "attn_scaled",
+      "input": "attn_logits",
+      "multiplier": 8192,
+      "shift": 16,
+      "out_dtype": "int16"
+    },
+    {
+      "type": "softmax",
+      "name": "attn_scores",
+      "input": "attn_scaled",
+      "seq_len": 1,
+      "num_heads": 14,
+      "tensor_layout": "BHSd",
+      "out_dtype": "int8"
+    },
+    {
+      "type": "sv_matmul",
+      "name": "attn_context",
+      "inputs": ["attn_scores", "v_proj"],
+      "seq_len": 1,
+      "num_heads": 14,
+      "head_dim": 64,
+      "tensor_layout": "BHSd",
+      "out_dtype": "int8"
+    },
+    {
+      "type": "linear",
+      "name": "o_proj",
+      "input": "attn_context",
+      "in_features": 896,
+      "out_features": 896,
+      "weight_key": "model_layers_0_self_attn_o_proj_weight",
+      "ms_multiplier": 165,
+      "ms_shift": 16,
+      "out_dtype": "int8"
+    }
+  ],
+  "global_config": {
+    "precision": "int8",
+    "quantization": "symmetric",
+    "target_scale": 0.007874015748031496,
+    "strict_attention": true
+  }
+}
+

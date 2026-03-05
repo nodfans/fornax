@@ -10,6 +10,8 @@ def main():
     parser = argparse.ArgumentParser(description="Fornax: LLM to Verilog Compiler")
     parser.add_argument("--model", type=str, default="Qwen/Qwen2-0.5B", help="HuggingFace model ID")
     parser.add_argument("--output", type=str, default="./output", help="Output directory")
+    parser.add_argument("--dim", type=int, default=None, help="Target feature dimension for generated IR/RTL")
+    parser.add_argument("--strict-attn", action="store_true", help="Emit strict-attention IR schema (inputs list for binary ops)")
     args = parser.parse_args()
     
     print("🚀 Fornax Compiler Starting...")
@@ -22,7 +24,7 @@ def main():
     
     # Stage 2: Convert
     print("\n--- [Stage 2: Convert] ---")
-    stg2 = ModelConverter(args.output)
+    stg2 = ModelConverter(args.output, target_dim=args.dim, strict_attention=args.strict_attn)
     stg2.convert()
     stg2.save(args.output)
 

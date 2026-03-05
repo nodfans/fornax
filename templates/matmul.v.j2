@@ -21,18 +21,26 @@ module matmul #(
 
     // Weight Storage - Explicitly SIGNED
     reg signed [7:0] weight_rom [0:IN_FEATURES*OUT_FEATURES-1];
+    // Internal Buffer for the input vector
+    reg signed [7:0] input_buffer [0:IN_FEATURES-1];
+    
+    integer i;
     initial begin
+        for (i = 0; i < IN_FEATURES*OUT_FEATURES; i = i + 1) weight_rom[i] = 0;
         if (WEIGHT_FILE != "") $readmemh(WEIGHT_FILE, weight_rom);
+        for (i = 0; i < IN_FEATURES; i = i + 1) begin
+            input_buffer[i] = 0;
+        end
     end
 
     // Control Logic
     reg signed [31:0] acc;
-    // Internal Buffer for the input vector
-    reg signed [7:0] input_buffer [0:IN_FEATURES-1];
     reg [15:0] in_count;       // Used for buffering input
     reg [15:0] out_feat_count; // Iterates through output features
     reg [15:0] mac_count;      // Iterates through MACs for a single output feature
     reg [1:0] state;           // 0: Idle/Capture, 1: Processing
+
+    wire [31:0] weight_idx = out_feat_count * IN_FEATURES + mac_count;
 
     // State Machine
     always @(posedge clk or negedge rst_n) begin
@@ -65,13 +73,13 @@ module matmul #(
                 
                 1: begin // Sequential MAC for each OUT_FEATURE
                     // Perform MAC operation
-                    acc <= acc + $signed(input_buffer[mac_count]) * $signed(weight_rom[out_feat_count * IN_FEATURES + mac_count]);
+                    acc <= acc + $signed(input_buffer[mac_count]) * $signed(weight_rom[weight_idx]);
                     
                     if (mac_count == IN_FEATURES - 1) begin
                         // This is the last MAC for the current output feature
                         // The 'acc' register holds the sum of the previous IN_FEATURES-1 products.
                         // The final product is added here to form the complete sum.
-                        out_data <= acc + $signed(input_buffer[mac_count]) * $signed(weight_rom[out_feat_count * IN_FEATURES + mac_count]);
+                        out_data <= acc + $signed(input_buffer[mac_count]) * $signed(weight_rom[weight_idx]);
                         out_valid <= 1;
                         acc <= 0; // Reset accumulator for the next output feature
                         mac_count <= 0; // Reset MAC counter for the next output feature
